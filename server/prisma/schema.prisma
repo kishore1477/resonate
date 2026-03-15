@@ -1,0 +1,408 @@
+// Resonate - Customer Feedback & Product Roadmap Platform
+// Database Schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// ENUMS
+// ============================================================================
+
+enum Plan {
+  FREE
+  STARTER
+  PROFESSIONAL
+  ENTERPRISE
+}
+
+enum MemberRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum PostStatus {
+  OPEN
+  UNDER_REVIEW
+  PLANNED
+  IN_PROGRESS
+  SHIPPED
+  CLOSED
+}
+
+enum ChangelogStatus {
+  DRAFT
+  PUBLISHED
+}
+
+enum NotificationType {
+  STATUS_CHANGE
+  NEW_COMMENT
+  POST_SHIPPED
+  MENTION
+}
+
+// ============================================================================
+// USER & AUTHENTICATION
+// ============================================================================
+
+model User {
+  id              String    @id @default(cuid())
+  email           String    @unique
+  name            String
+  avatar          String?
+  passwordHash    String?
+  emailVerified   Boolean   @default(false)
+  emailVerifiedAt DateTime?
+  tokenVersion    Int       @default(0) // For JWT invalidation
+  lastLoginAt     DateTime?
+
+  // OAuth providers
+  googleId        String?   @unique
+
+  // Relations
+  memberships     Membership[]
+  posts           Post[]
+  votes           Vote[]
+  comments        Comment[]
+  notifications   Notification[]
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
+
+  @@index([email])
+}
+
+// ============================================================================
+// MULTI-TENANCY
+// ============================================================================
+
+model Workspace {
+  id           String   @id @default(cuid())
+  name         String
+  slug         String   @unique
+  logo         String?
+  description  String?
+  customDomain String?  @unique
+  plan         Plan     @default(FREE)
+
+  // Branding
+  primaryColor String?
+  accentColor  String?
+
+  // Settings (JSON for flexibility)
+  settings     Json     @default("{}")
+
+  // Relations
+  memberships  Membership[]
+  boards       Board[]
+  changelogs   Changelog[]
+  apiKeys      ApiKey[]
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  deletedAt    DateTime?
+
+  @@index([slug])
+  @@index([customDomain])
+}
+
+model Membership {
+  id          String     @id @default(cuid())
+  userId      String
+  workspaceId String
+  role        MemberRole @default(MEMBER)
+
+  // Invitation tracking
+  invitedBy   String?
+  invitedAt   DateTime   @default(now())
+  joinedAt    DateTime?
+
+  // Relations
+  user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace   Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@unique([userId, workspaceId])
+  @@index([workspaceId])
+  @@index([userId])
+}
+
+model ApiKey {
+  id          String    @id @default(cuid())
+  workspaceId String
+  name        String
+  keyHash     String    @unique  // Store hashed version
+  keyPrefix   String             // First 8 chars for identification
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime  @default(now())
+
+  @@index([keyHash])
+  @@index([workspaceId])
+}
+
+// ============================================================================
+// FEEDBACK BOARDS
+// ============================================================================
+
+model Board {
+  id          String    @id @default(cuid())
+  workspaceId String
+  name        String
+  slug        String
+  description String?
+  isPublic    Boolean   @default(true)
+  isLocked    Boolean   @default(false)  // Prevent new submissions
+  order       Int       @default(0)
+
+  // Settings
+  allowAnonymous      Boolean @default(false)
+  requireApproval     Boolean @default(false)
+  showVoteCount       Boolean @default(true)
+  allowComments       Boolean @default(true)
+
+  // Relations
+  workspace   Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  categories  Category[]
+  posts       Post[]
+
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  deletedAt   DateTime?
+
+  @@unique([workspaceId, slug])
+  @@index([workspaceId])
+}
+
+model Category {
+  id      String @id @default(cuid())
+  boardId String
+  name    String
+  color   String @default("#6B7280")
+  order   Int    @default(0)
+
+  board   Board  @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  posts   Post[]
+
+  @@unique([boardId, name])
+  @@index([boardId])
+}
+
+// ============================================================================
+// POSTS & ENGAGEMENT
+// ============================================================================
+
+model Post {
+  id           String     @id @default(cuid())
+  boardId      String
+  categoryId   String?
+  authorId     String
+  title        String
+  content      String     @db.Text
+  status       PostStatus @default(OPEN)
+
+  // Denormalized for performance
+  voteCount    Int        @default(0)
+  commentCount Int        @default(0)
+
+  // Moderation
+  isLocked     Boolean    @default(false)
+  isPinned     Boolean    @default(false)
+  isApproved   Boolean    @default(true)
+
+  // Duplicate handling
+  mergedIntoId String?
+
+  // Relations
+  board        Board         @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  category     Category?     @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  author       User          @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  mergedInto   Post?         @relation("MergedPosts", fields: [mergedIntoId], references: [id], onDelete: SetNull)
+  mergedPosts  Post[]        @relation("MergedPosts")
+  votes        Vote[]
+  comments     Comment[]
+  tags         PostTag[]
+  roadmapItem  RoadmapItem?
+  statusHistory PostStatusHistory[]
+
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  deletedAt    DateTime?
+
+  @@index([boardId, status])
+  @@index([boardId, voteCount(sort: Desc)])
+  @@index([authorId])
+  @@index([mergedIntoId])
+}
+
+model PostStatusHistory {
+  id        String     @id @default(cuid())
+  postId    String
+  fromStatus PostStatus?
+  toStatus  PostStatus
+  changedBy String
+  note      String?
+
+  post      Post       @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime   @default(now())
+
+  @@index([postId])
+}
+
+model Vote {
+  id        String   @id @default(cuid())
+  postId    String
+  voterId   String
+  value     Int      @default(1)  // 1 for upvote, could support -1 for downvote
+
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  voter     User     @relation(fields: [voterId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([postId, voterId])
+  @@index([postId])
+  @@index([voterId])
+}
+
+model Comment {
+  id         String   @id @default(cuid())
+  postId     String
+  authorId   String
+  parentId   String?  // For threaded comments
+  content    String   @db.Text
+  isInternal Boolean  @default(false)  // Team-only comment
+  isEdited   Boolean  @default(false)
+
+  post       Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  author     User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  parent     Comment? @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies    Comment[] @relation("CommentReplies")
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  deletedAt  DateTime?
+
+  @@index([postId])
+  @@index([authorId])
+  @@index([parentId])
+}
+
+// ============================================================================
+// TAGS
+// ============================================================================
+
+model Tag {
+  id          String    @id @default(cuid())
+  workspaceId String
+  name        String
+  color       String    @default("#6B7280")
+
+  posts       PostTag[]
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId])
+}
+
+model PostTag {
+  postId String
+  tagId  String
+
+  post   Post   @relation(fields: [postId], references: [id], onDelete: Cascade)
+  tag    Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([postId, tagId])
+}
+
+// ============================================================================
+// ROADMAP
+// ============================================================================
+
+model RoadmapItem {
+  id       String  @id @default(cuid())
+  postId   String  @unique
+  column   String  // e.g., "planned", "in_progress", "shipped"
+  order    Int     @default(0)
+  eta      DateTime?
+
+  post     Post    @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([column, order])
+}
+
+// ============================================================================
+// CHANGELOG
+// ============================================================================
+
+model Changelog {
+  id          String          @id @default(cuid())
+  workspaceId String
+  title       String
+  slug        String
+  content     String          @db.Text
+  excerpt     String?
+  coverImage  String?
+  status      ChangelogStatus @default(DRAFT)
+  publishedAt DateTime?
+
+  // Linked posts that were shipped
+  linkedPostIds String[]
+
+  workspace   Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@unique([workspaceId, slug])
+  @@index([workspaceId, status])
+}
+
+model ChangelogSubscriber {
+  id          String   @id @default(cuid())
+  workspaceId String
+  email       String
+
+  createdAt   DateTime @default(now())
+
+  @@unique([workspaceId, email])
+  @@index([workspaceId])
+}
+
+// ============================================================================
+// NOTIFICATIONS
+// ============================================================================
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  type      NotificationType
+  title     String
+  message   String
+  data      Json             @default("{}")
+  read      Boolean          @default(false)
+  readAt    DateTime?
+
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime         @default(now())
+
+  @@index([userId, read])
+}
