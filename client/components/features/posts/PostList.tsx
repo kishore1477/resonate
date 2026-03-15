@@ -41,9 +41,6 @@ export function PostList({ posts, boardSlug, workspaceSlug, onVote, onUnvote }: 
       </div>
     );
   }
-
-  
-
   return (
     <div className="space-y-4">
       {posts.map((post) => (
